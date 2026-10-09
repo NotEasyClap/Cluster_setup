@@ -1,0 +1,123 @@
+---
+- name: setting up the cri (container runtime interface) that is containerd (other examples include cri-o, docker- cri containerd, etc.) which enables kubernetes to support the execution environment using runC or crun Linux containers and vms and sandboxed using Kata Containers or gVisor 
+  vars:
+    # Versions
+    containerd_version: "2.4.1"
+    cni_version: "1.9.1"
+    runc_version: "1.6.0-rc.1"
+    crictl_version: "1.37.0"
+    arch: "amd64"
+
+    # URLs
+    containerd_url: "https://github.com/containerd/containerd/releases/download/v{{ containerd_version }}"
+    containerd_file: "containerd-{{ containerd_version }}-linux-{{ arch }}.tar.gz"
+    runc_url: "https://github.com/opencontainers/runc/releases/download/v{{ runc_version }}"
+    runc_file: "runc.{{ arch }}"
+    cni_url: "https://github.com/containernetworking/plugins/releases/download/v{{ cni_version }}"
+    cni_file: "cni-plugins-linux-{{ arch }}-v{{ cni_version }}.tgz"
+    crictl_url: "https://github.com/kubernetes-sigs/cri-tools/releases/download/v{{ crictl_version }}/crictl-v{{ crictl_version }}-linux-{{ arch }}.tar.gz"
+  hosts: all
+  tasks:
+    - name: installing common tools
+      yum:
+        name: 
+          - git
+          - jq
+        state: present
+    - name: create required directories 
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/cni/bin
+        - /usr/local/lib/systemd/system
+        - /etc/containerd
+    # ------------------ Step 1: containerd -------------
+    - name: install containerd tarball 
+      get_url:
+        url: "{{ containerd_url }}/{{ containerd_file }}"
+        dest: "/tmp/{{ containerd_file }}"
+        checksum: "sha256:{{ containerd_url }}/{{ containerd_file }}.sha256sum"
+        mode: "0644"
+
+    - name: extract containerd
+      unarchive:
+        src: "/tmp/{{ containerd_file }}"
+        dest: /usr/local
+        remote_src: true
+      notify: restart_containerd
+
+    - name: containerd systemd service
+      get_url:
+        url: "https://raw.githubusercontent.com/containerd/containerd/main/containerd.service"
+        dest: /etc/systemd/system/containerd.service
+        mode: "0644"
+      notify: restart_containerd
+    
+    # ----------------- Step 2: runc ---------------------
+    - name: installing the runc (run container specification) 
+      get_url:
+        url: "{{ runc_url }}/{{ runc_file }}"
+        dest: /usr/local/sbin/runc
+        checksum: "sha256:7ab1aa1d62350a2658b4c9050a41eb53fcbaa2e26062cf838d38c686b91f50cc"
+        mode: "0755"
+    
+    # --------------------- Step 3: CNI Plugins ---------------- 
+    - name: installing CNI Plugins 
+      get_url:
+        url: "{{ cni_url }}/{{ cni_file }}"
+        dest: "/tmp/{{ cni_file }}"
+        checksum: "sha256:{{ cni_url }}/{{ cni_file }}.sha256"
+        mode: "0644"
+
+    - name: extracting cni tar
+      unarchive:
+        src: "/tmp/{{ cni_file }}"
+        dest: /opt/cni/bin
+        mode: "0755"    
+        remote_src: true
+
+        # ---------- Step 4: Installing Crictl ---------------------
+    - name: installing crictl
+      get_url:
+        url: "{{ crictl_url }}"
+        dest: "/tmp/crictl-{{ crictl_version }}.tar.gz"
+        mode: "0644"
+        checksum: "sha256:{{ crictl_url }}.sha256"
+
+    - name: extracting crictl
+      unarchive:
+        src: "/tmp/crictl-{{ crictl_version}}.tar.gz"
+        dest: /usr/local/bin/
+        mode: "0755"
+        remote_src: true
+
+        # ---------- Step 5: configuration for Kubernetes ----------
+    - name: Generate default containerd config (only if it does not exist yet)
+      ansible.builtin.shell: /usr/local/bin/containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+ 
+    - name: Use the systemd cgroup driver (required to match kubelet)
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)SystemdCgroup = false'
+        replace: '\1SystemdCgroup = true'
+      notify: restart_containerd
+
+    - name: enable and start the service
+      service:
+        name: containerd
+        enabled: true
+        state: started
+        daemon_reload: true
+
+
+  handlers:
+    - name: restart_containerd
+      service:
+        name: containerd
+        state: restarted
+        enabled: true
+        daemon_reload: true
